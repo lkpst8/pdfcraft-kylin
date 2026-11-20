@@ -1,54 +1,160 @@
-name: Build PDFCraft Kylin ARM64 glibc 2.31
+name: Build PdfCraft for Kylin ARM64 (glibc 2.31)
+
 on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: Publish verified packages to GitHub Releases
+        type: boolean
+        default: true
+        required: true
+
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: pdfcraft-kylin-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
+    name: Build and verify (Ubuntu 20.04 / aarch64)
     runs-on: ubuntu-24.04-arm
     container:
       image: ubuntu:20.04
     timeout-minutes: 240
     env:
       DEBIAN_FRONTEND: noninteractive
-      CARGO_BUILD_JOBS: "2"
-      CARGO_INCREMENTAL: "0"
+      CARGO_INCREMENTAL: '0'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_TERM_COLOR: always
+      CRAFT_I18N_REQUIRED: '1'
+      CRAFT_I18N_DIR: ${{ github.workspace }}/craft-i18n
     steps:
-      - name: Dependencies
+      - name: Install Ubuntu 20.04 build dependencies
         run: |
           set -eux
           test "$(dpkg --print-architecture)" = arm64
-          test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.31"
+          test "$(getconf GNU_LIBC_VERSION)" = 'glibc 2.31'
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl git bash python3 file binutils build-essential pkg-config libssl-dev libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev libgl1-mesa-dev libgtk-3-dev dpkg-dev xz-utils
-      - uses: actions/checkout@v4
-      - name: Download upstream sources
-        run: |
-          git clone https://github.com/storytold/pdfcraft.git upstream
-          cd upstream
-          git checkout b503b2e62dfeec5598f344e4e287d9c9cbdb34fa
-      - name: Install Rust toolchain
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git bash python3 file binutils \
+            build-essential pkg-config libssl-dev \
+            libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev \
+            libxi-dev libgl1-mesa-dev libgtk-3-dev \
+            dpkg-dev xz-utils tar gzip
+
+      - name: Checkout build scripts
+        uses: actions/checkout@v4
+        with:
+          path: builder
+          persist-credentials: false
+
+      - name: Checkout pinned PdfCraft v0.21.1
+        uses: actions/checkout@v4
+        with:
+          repository: storytold/pdfcraft
+          ref: b503b2e62dfeec5598f344e4e287d9c9cbdb34fa
+          path: upstream
+          persist-credentials: false
+
+      - name: Checkout pinned Chinese translations
+        uses: actions/checkout@v4
+        with:
+          repository: storytold/craft-i18n
+          ref: 575cfdef63227b14daf173b8cc87928bfdfa325e
+          path: craft-i18n
+          persist-credentials: false
+
+      - name: Install Rust 1.95.0
         shell: bash
         run: |
           set -euxo pipefail
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.95.0
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain 1.95.0
+          source "$HOME/.cargo/env"
+          rustc --version
+          cargo --version
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - name: Build and verify binary compatibility
+
+      - name: Compile and produce offline packages
         shell: bash
         run: |
+          set -euxo pipefail
           source "$HOME/.cargo/env"
-          bash scripts/build.sh
-      - name: Upload files
+          bash builder/scripts/build-package.sh "$GITHUB_WORKSPACE/upstream" "$GITHUB_WORKSPACE/dist"
+
+      - name: Enforce ARM64 and GLIBC 2.31 ABI
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 builder/scripts/verify-compat.py \
+            upstream/target/release/pdfcraft \
+            upstream/target/release/pdfcraft-cli | tee dist/compatibility-report.txt
+          dpkg-deb --field dist/*.deb Package Version Architecture Depends
+          dpkg-deb --contents dist/*.deb | grep '/usr/bin/pdfcraft$'
+          grep -Fq 'libc6 (>= 2.31)' <(dpkg-deb --field dist/*.deb Depends)
+          if dpkg-deb --field dist/*.deb Depends | grep -q 'libc6 (>= 2.35)'; then
+            echo 'ERROR: Debian package requires libc6 >= 2.35'
+            exit 1
+          fi
+
+      - name: Generate and check SHA256 manifest
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd dist
+          sha256sum *.deb *.tar.gz compatibility-report.txt > SHA256SUMS
+          sha256sum -c SHA256SUMS
+          ls -lh
+
+      - name: Upload verified output
         uses: actions/upload-artifact@v4
         with:
-          name: pdfcraft-kylin-arm64-glibc231
+          name: pdfcraft-kylin-0.21.1-arm64-glibc231
           path: dist/*
           if-no-files-found: error
-      - name: Publish release
-        if: github.event_name == 'workflow_dispatch'
+          retention-days: 90
+
+  publish:
+    name: Publish verified GitHub Release
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: pdfcraft-kylin-0.21.1-arm64-glibc231
+          path: dist
+
+      - name: Recheck SHA256
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd dist
+          sha256sum -c SHA256SUMS
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: kylin-v0.21.1-glibc231
-          files: dist/*
+          target_commitish: ${{ github.sha }}
+          name: PdfCraft 0.21.1 - Kylin ARM64 - glibc 2.31
+          body: |
+            Unofficial PDFCraft v0.21.1 compatibility build for Kylin ARM64.
+            Compiled inside Ubuntu 20.04, with a hard GLIBC_2.31 symbol check.
+            Includes offline OCR models and translations.
+            Device graphics libraries still require Kylin system testing.
+          files: |
+            dist/*.deb
+            dist/*.tar.gz
+            dist/SHA256SUMS
+            dist/compatibility-report.txt
+          fail_on_unmatched_files: true
+          overwrite_files: true
+          make_latest: false
