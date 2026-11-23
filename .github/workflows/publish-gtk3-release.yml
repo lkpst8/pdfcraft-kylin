@@ -1,0 +1,83 @@
+name: Publish verified PdfCraft Kylin GTK3 release
+
+# One-time publication of the already verified build. The run ID and
+# source commit are pinned to avoid accidentally publishing another build.
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-gtk3-release.yml'
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  release:
+    name: Publish verified build artifacts
+    if: github.repository == 'lkpst8/pdfcraft-kylin'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Download verified build from run 45122666210
+        uses: actions/download-artifact@v4
+        with:
+          name: pdfcraft-kylin-0.21.1-arm64-glibc231
+          repository: lkpst8/pdfcraft-kylin
+          run-id: 45122666210
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: dist
+
+      - name: Verify package set, checksums and compatibility
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd dist
+          test -s pdfcraft-0.21.1-kylin-glibc231-gtk3-arm64.deb
+          test -s pdfcraft-0.21.1-kylin-glibc231-gtk3-arm64.tar.gz
+          test -s compatibility-report.txt
+          test -s SHA256SUMS
+          sha256sum -c SHA256SUMS
+          grep -Fq 'GLIBC_2.31 ABI guard: PASS' compatibility-report.txt
+          test "$(grep -Fc 'GLIBC_2.31 ABI guard: PASS' compatibility-report.txt)" -eq 2
+          test "$(dpkg-deb --field pdfcraft-0.21.1-kylin-glibc231-gtk3-arm64.deb Architecture)" = arm64
+          dpkg-deb --field pdfcraft-0.21.1-kylin-glibc231-gtk3-arm64.deb Package Version Depends
+          dpkg-deb --field pdfcraft-0.21.1-kylin-glibc231-gtk3-arm64.deb Depends | grep -Fq 'libgtk-3-0'
+          mkdir -p package
+          dpkg-deb --extract pdfcraft-0.21.1-kylin-glibc231-gtk3-arm64.deb package
+          grep -Fxq 'Exec=env PDFCRAFT_RENDERER=gl pdfcraft %U' package/usr/share/applications/ai.storyteller.pdfcraft.desktop
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: kylin-v0.21.1-glibc231-gtk3
+          target_commitish: 18cc6be0865f4417cea5756cc2d953a9bc1eeec6
+          name: PDFCraft 0.21.1 - Kylin ARM64 (GTK3 + OpenGL, glibc 2.31)
+          draft: false
+          prerelease: false
+          make_latest: true
+          overwrite_files: false
+          body: |
+            Unofficial PDFCraft v0.21.1 compatibility build for Galaxy Kylin V10 SP1 ARM64.
+            
+            - Native GTK3 file picker (no Zenity/XDG Portal needed)
+            - OpenGL renderer configured for the desktop launcher and PDF right-click Open With
+            - ARM64 / glibc 2.31 ABI verified
+            - Includes offline OCR models and Chinese translations
+            - Does not change the system default PDF viewer
+            
+            Source build: https://github.com/lkpst8/pdfcraft-kylin/actions/runs/45122666210
+            Pinned source commit: 18cc6be0865f4417cea5756cc2d953a9bc1eeec6
+            
+            Download the .deb file to an approved external device, transfer it by USB,
+            and install/upgrade locally. Checksum manifest: SHA256SUMS.
+            
+            GTK3 picker and OpenGL display compatibility were verified by build checks;
+            confirm the picker and file operations on the target offline Kylin desktop.
+          files: |
+            dist/pdfcraft-0.21.1-kylin-glibc231-gtk3-arm64.deb
+            dist/pdfcraft-0.21.1-kylin-glibc231-gtk3-arm64.tar.gz
+            dist/SHA256SUMS
+            dist/compatibility-report.txt
+          fail_on_unmatched_files: true
