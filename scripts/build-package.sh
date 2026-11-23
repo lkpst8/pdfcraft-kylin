@@ -6,8 +6,8 @@ mkdir -p "$OUT_DIR"
 OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 APP_ID='ai.storyteller.pdfcraft'
 VERSION='0.21.1'
-RELEASE='1kylin231'
-NAME="pdfcraft-${VERSION}-kylin-glibc231-arm64"
+RELEASE='2kylin231gtk3'
+NAME="pdfcraft-${VERSION}-kylin-glibc231-gtk3-arm64"
 if [[ "$(uname -m)" != 'aarch64' ]] || [[ "$(getconf GNU_LIBC_VERSION)" != 'glibc 2.31' ]]; then
   echo 'ERROR: Build requires native aarch64 and glibc 2.31' >&2
   exit 1
@@ -18,7 +18,22 @@ test -d "${CRAFT_I18N_DIR:?required}/locales"
 export CRAFT_I18N_REQUIRED=1
 export PDFCRAFT_BUILD_LABEL=kylin231
 cd "$SOURCE_DIR"
-cargo build --locked --release -p pdfcraft -p pdfcraft-cli
+# Force the native GTK3 picker instead of the XDG portal / zenity backend.
+# Feature unification requires disabling rfd defaults at the workspace definition.
+python3 - <<'PY'
+from pathlib import Path
+p = Path("Cargo.toml")
+s = p.read_text()
+old = 'rfd = "0.17"'
+new = 'rfd = { version = "0.17", default-features = false, features = ["gtk3"] }'
+if s.count(old) != 1:
+    raise SystemExit("Upstream rfd declaration changed; refusing blind patch")
+p.write_text(s.replace(old, new, 1))
+print("GTK3 picker selected in workspace Cargo.toml")
+PY
+# Enabling GTK3 can add native dependencies to Cargo.lock. Preserve pinned
+# upstream versions wherever possible, allowing Cargo to update the lockfile.
+cargo build --release -p pdfcraft -p pdfcraft-cli
 BIN="$SOURCE_DIR/target/release"
 "$BIN/pdfcraft" --version
 "$BIN/pdfcraft-cli" --version
@@ -28,6 +43,9 @@ trap 'rm -rf "$STAGE" "$TAR_TOP"' EXIT
 install -Dm755 "$BIN/pdfcraft" "$STAGE/usr/bin/pdfcraft"
 install -Dm755 "$BIN/pdfcraft-cli" "$STAGE/usr/bin/pdfcraft-cli"
 install -Dm644 "$SOURCE_DIR/packaging/linux/$APP_ID.desktop" "$STAGE/usr/share/applications/$APP_ID.desktop"
+# Kylin ARM64 GPU drivers need the OpenGL renderer for a visible interface.
+sed -i 's|^Exec=pdfcraft %U$|Exec=env PDFCRAFT_RENDERER=gl pdfcraft %U|' "$STAGE/usr/share/applications/$APP_ID.desktop"
+grep -Fxq 'Exec=env PDFCRAFT_RENDERER=gl pdfcraft %U' "$STAGE/usr/share/applications/$APP_ID.desktop"
 install -Dm644 "$SOURCE_DIR/packaging/linux/$APP_ID.mime.xml" "$STAGE/usr/share/mime/packages/$APP_ID.xml"
 install -d "$STAGE/usr/share/metainfo" "$STAGE/usr/share/icons" "$STAGE/usr/share/doc/pdfcraft"
 sed -e "s/@VERSION@/$VERSION/g" -e "s/@DATE@/$(date -u +%Y-%m-%d)/g" "$SOURCE_DIR/packaging/linux/$APP_ID.metainfo.xml.in" > "$STAGE/usr/share/metainfo/$APP_ID.metainfo.xml"
@@ -53,7 +71,7 @@ Priority: optional
 Architecture: arm64
 Maintainer: Unofficial Kylin compatibility build <noreply@users.noreply.github.com>
 Homepage: https://github.com/storytold/pdfcraft
-Depends: libc6 (>= 2.31), libgcc-s1, libxkbcommon0, libvulkan1 | libegl1
+Depends: libc6 (>= 2.31), libgcc-s1, libxkbcommon0, libgtk-3-0, libvulkan1 | libegl1
 Recommends: libwayland-client0, libx11-6, libx11-xcb1, libxcursor1, libxi6, libxrandr2, cups-client
 Description: PdfCraft PDF viewer/editor compatibility build for Kylin ARM64
  Built from PdfCraft v0.21.1 on Ubuntu 20.04 ARM64.
